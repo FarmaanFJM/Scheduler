@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
+import fs from 'node:fs/promises'
 
 const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -44,7 +45,9 @@ const indexHtml = path.join(RENDERER_DIST, 'index.html')
 
 async function createWindow() {
   win = new BrowserWindow({
-    title: 'Main window',
+    title: 'Scheduler',
+    width: 1400,
+    height: 900,
     icon: path.join(process.env.VITE_PUBLIC, 'favicon.ico'),
     webPreferences: {
       preload,
@@ -100,6 +103,49 @@ app.on('activate', () => {
   } else {
     createWindow()
   }
+})
+
+// ──────────────────────────────────────────────────────────────
+// Filesystem IPC handlers for scheduler data persistence
+// All relative paths are resolved against app.getPath('userData')
+// ──────────────────────────────────────────────────────────────
+
+function resolveDataPath(relativePath: string): string {
+  const userData = app.getPath('userData')
+  // Prevent path traversal attacks
+  const resolved = path.resolve(userData, relativePath)
+  if (!resolved.startsWith(userData)) {
+    throw new Error('Path traversal detected')
+  }
+  return resolved
+}
+
+ipcMain.handle('fs:getDataPath', () => app.getPath('userData'))
+
+ipcMain.handle('fs:readFile', async (_, relativePath: string) => {
+  const fullPath = resolveDataPath(relativePath)
+  return fs.readFile(fullPath, 'utf-8')
+})
+
+ipcMain.handle('fs:writeFile', async (_, relativePath: string, content: string) => {
+  const fullPath = resolveDataPath(relativePath)
+  await fs.mkdir(path.dirname(fullPath), { recursive: true })
+  await fs.writeFile(fullPath, content, 'utf-8')
+})
+
+ipcMain.handle('fs:fileExists', async (_, relativePath: string) => {
+  try {
+    const fullPath = resolveDataPath(relativePath)
+    await fs.access(fullPath)
+    return true
+  } catch {
+    return false
+  }
+})
+
+ipcMain.handle('fs:ensureDir', async (_, relativePath: string) => {
+  const fullPath = resolveDataPath(relativePath)
+  await fs.mkdir(fullPath, { recursive: true })
 })
 
 // New window example arg: new windows url

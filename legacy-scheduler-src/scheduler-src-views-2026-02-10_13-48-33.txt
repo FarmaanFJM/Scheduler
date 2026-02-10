@@ -1,0 +1,1531 @@
+## backlogRenderer.ts
+
+/**
+ * Backlog Sidebar Renderer
+ * 
+ * RESPONSIBILITY:
+ * Renders the collapsible backlog sidebar on the right side of the scheduler.
+ * Displays to-do items organized by category with expand/collapse functionality.
+ * 
+ * USED BY:
+ * - view.ts (main scheduler view calls renderBacklog())
+ * 
+ * FEATURES:
+ * - Collapsible sidebar with toggle button
+ * - Items grouped by category
+ * - Reorder items within category (up/down buttons)
+ * - Edit, delete, and checkbox (for tasks) buttons
+ * - Add new items and clear all functionality
+ * 
+ * VISUAL HIERARCHY:
+ * - Collapsed: Only shows toggle button (→)
+ * - Expanded: Shows title, buttons, and categorized item list
+ */
+import type SchedulerPlugin from '../main';
+import { SchedulerItem, CategoryConfig } from '../types';
+import { AddItemModal } from '../modals/addItemModal';
+import { EditItemModal } from '../modals/editItemModal';
+import { ItemRenderer } from './itemRenderer';
+
+export class BacklogRenderer {
+    private plugin: SchedulerPlugin;
+    private itemRenderer: ItemRenderer;
+    private refreshView: () => void;
+
+    constructor(plugin: SchedulerPlugin, refreshView: () => void) {
+        this.plugin = plugin;
+        this.itemRenderer = new ItemRenderer(plugin);
+        this.refreshView = refreshView;
+    }
+
+    /**
+     * Render the backlog sidebar section
+     * Adapts UI based on expanded/collapsed state
+     */
+    renderBacklog(container: Element) {
+        // Add collapsed/expanded class
+        if (this.plugin.settings.backlogExpanded) {
+            container.addClass('backlog-expanded');
+        } else {
+            container.addClass('backlog-collapsed');
+        }
+
+        const backlogHeader = container.createDiv({ cls: 'backlog-header' });
+
+        // Toggle button (always visible)
+        const toggleBtn = backlogHeader.createEl('button', {
+            cls: 'backlog-toggle-btn',
+            text: this.plugin.settings.backlogExpanded ? '→' : '←'
+        });
+        toggleBtn.setAttribute(
+            'aria-label',
+            this.plugin.settings.backlogExpanded ? 'Collapse sidebar' : 'Expand sidebar'
+        );
+        toggleBtn.addEventListener('click', () => {
+            this.plugin.toggleBacklogSidebar();
+        });
+
+        // Only show title and buttons when expanded
+        if (this.plugin.settings.backlogExpanded) {
+            backlogHeader.createEl('h3', { text: 'To-Do Backlog' });
+
+            // Create button container
+            const buttonContainer = backlogHeader.createDiv({ cls: 'backlog-header-buttons' });
+
+            // Add button
+            const addBtn = buttonContainer.createEl('button', {
+                cls: 'add-task-btn',
+                text: '+'
+            });
+            addBtn.addEventListener('click', () => {
+                this.openAddBacklogItemModal();
+            });
+
+            // Trash button
+            const trashBtn = buttonContainer.createEl('button', {
+                cls: 'trash-task-btn',
+                text: '🗑️'
+            });
+            trashBtn.addEventListener('click', () => {
+                const confirmed = confirm('Clear all backlog items?');
+                if (confirmed) {
+                    this.plugin.clearBacklogItems();
+                }
+            });
+        }
+
+        // Only render list when expanded
+        if (this.plugin.settings.backlogExpanded) {
+            this.renderBacklogList(container);
+        }
+    }
+
+    /**
+     * Render the list of backlog items grouped by category
+     */
+    private renderBacklogList(container: Element) {
+        const backlogList = container.createDiv({ cls: 'backlog-list' });
+        const allItems = this.plugin.getBacklogItems();
+
+        if (allItems.length === 0) {
+            backlogList.createDiv({
+                cls: 'backlog-empty',
+                text: 'No items in backlog'
+            });
+            return;
+        }
+
+        // Group backlog items by category
+        const itemsByCategory: Record<string, SchedulerItem[]> = {};
+
+        this.plugin.settings.categories.forEach((cat: CategoryConfig) => {
+            itemsByCategory[cat.id] = [];
+        });
+
+        allItems.forEach((item: SchedulerItem) => {
+            if (itemsByCategory[item.categoryId]) {
+                itemsByCategory[item.categoryId].push(item);
+            }
+        });
+
+        // Render each category that has items
+        this.plugin.settings.categories.forEach((category: CategoryConfig) => {
+            const items = itemsByCategory[category.id];
+            if (items.length === 0) return;
+
+            // Category divider
+            const header = backlogList.createDiv({ cls: 'monthly-type-header' });
+            header.setText(`──────── ${category.name.toUpperCase()} ────────`);
+
+            // Render items in this category
+            items.forEach((item, index) => {
+                this.renderBacklogItemCard(
+                    backlogList,
+                    item,
+                    index,
+                    items.length,
+                    category.id
+                );
+            });
+        });
+    }
+
+    /**
+     * Render a single backlog item card with controls
+     */
+    private renderBacklogItemCard(
+        backlogList: HTMLElement,
+        item: SchedulerItem,
+        index: number,
+        totalCount: number,
+        categoryId: string
+    ) {
+        const category = this.itemRenderer.getCategoryById(item.categoryId);
+        const itemCard = backlogList.createDiv({ cls: 'task-card' });
+
+        // Apply styling
+        const textColor = this.itemRenderer.applyItemStyling(itemCard, item, category);
+
+        // Create content (name and description)
+        if (textColor && category) {
+            this.itemRenderer.createItemContent(itemCard, item, textColor);
+        } else {
+            // Fallback if no category
+            itemCard.createDiv({ cls: 'task-name', text: item.name });
+            if (item.description) {
+                itemCard.createDiv({ cls: 'task-description', text: item.description });
+            }
+        }
+
+        // Button container
+        const btnContainer = itemCard.createDiv({ cls: 'task-buttons' });
+
+        // Reorder buttons (within same category)
+        this.itemRenderer.createReorderButtons(
+            btnContainer,
+            index,
+            totalCount,
+            (direction) => {
+                this.plugin.reorderBacklogItemInCategory(item.id, categoryId, direction);
+            }
+        );
+
+        // Checkbox for tasks
+        this.itemRenderer.createCheckboxButton(btnContainer, item, () => {
+            this.plugin.updateItem(item.id, { completed: !item.completed });
+        });
+
+        // Edit button
+        this.itemRenderer.createEditButton(btnContainer, () => {
+            this.openEditBacklogItemModal(item);
+        });
+
+        // Delete button
+        this.itemRenderer.createDeleteButton(btnContainer, () => {
+            this.plugin.removeItem(item.id);
+            this.refreshView();
+        });
+    }
+
+    /**
+     * Open modal to add new backlog item
+     */
+    private openAddBacklogItemModal() {
+        const modal = new AddItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            'New Backlog Item',
+            (item: Omit<SchedulerItem, 'id'>) => {
+                this.plugin.addBacklogItem(item);
+            }
+        );
+        modal.open();
+    }
+
+    /**
+     * Open modal to edit existing backlog item
+     */
+    private openEditBacklogItemModal(item: SchedulerItem) {
+        const modal = new EditItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            item,
+            (updates: Partial<SchedulerItem>) => {
+                this.plugin.updateItem(item.id, updates);
+            }
+        );
+        modal.open();
+    }
+}
+
+
+## goalsRenderer.ts
+
+/**
+ * General Goals Section Renderer
+ * 
+ * RESPONSIBILITY:
+ * Renders the general goals section displaying long-term goals organized by category.
+ * Goals are displayed in a grid layout with 3 categories per row.
+ * 
+ * USED BY:
+ * - view.ts (main scheduler view calls renderGoals())
+ * 
+ * FEATURES:
+ * - Grid layout (3 columns per row)
+ * - Goals grouped by category
+ * - Add goal button per category (locks category and type)
+ * - Clear category goals button
+ * - Reorder goals within category (up/down buttons)
+ * - Edit and delete goal cards
+ * 
+ * VISUAL LAYOUT:
+ * - Each category gets its own column
+ * - Goals appear as cards with gold/colored borders
+ * - Empty categories still show header with add button
+ */
+import type SchedulerPlugin from '../main';
+import { SchedulerItem, CategoryConfig, ItemType } from '../types';
+import { AddItemModal } from '../modals/addItemModal';
+import { EditItemModal } from '../modals/editItemModal';
+import { ItemRenderer } from './itemRenderer';
+
+export class GoalsRenderer {
+    private plugin: SchedulerPlugin;
+    private itemRenderer: ItemRenderer;
+    private refreshView: () => void;
+
+    constructor(plugin: SchedulerPlugin, refreshView: () => void) {
+        this.plugin = plugin;
+        this.itemRenderer = new ItemRenderer(plugin);
+        this.refreshView = refreshView;
+    }
+
+    /**
+     * Render goals section header (just title, no controls)
+     */
+    renderGoalsHeader(container: Element) {
+        const goalsHeader = container.createDiv({ cls: 'scheduler-section-header' });
+        const titleContainer = goalsHeader.createDiv({ cls: 'header-title-container' });
+        titleContainer.createEl('h2', { text: 'General Goals' });
+    }
+
+    /**
+     * Render goals grid with categories in rows of 3
+     */
+    renderGeneralGoals(container: Element) {
+        const goalsGrid = container.createDiv({ cls: 'goals-grid' });
+
+        const allGoals = this.plugin.getGeneralGoals();
+
+        // Group goals by category
+        const goalsByCategory: Record<string, SchedulerItem[]> = {};
+
+        this.plugin.settings.categories.forEach((cat: CategoryConfig) => {
+            goalsByCategory[cat.id] = [];
+        });
+
+        allGoals.forEach((goal: SchedulerItem) => {
+            if (goalsByCategory[goal.categoryId]) {
+                goalsByCategory[goal.categoryId].push(goal);
+            }
+        });
+
+        // Render in rows of 3 categories each
+        const categories = this.plugin.settings.categories;
+        for (let i = 0; i < categories.length; i += 3) {
+            const goalsRow = goalsGrid.createDiv({ cls: 'goals-row' });
+
+            for (let j = 0; j < 3 && i + j < categories.length; j++) {
+                const category = categories[i + j];
+                const goals = goalsByCategory[category.id] || [];
+                this.renderGoalsCategoryColumn(goalsRow, category, goals);
+            }
+        }
+    }
+
+    /**
+     * Render a single category column with its goals
+     */
+    private renderGoalsCategoryColumn(
+        row: HTMLElement,
+        category: CategoryConfig,
+        goals: SchedulerItem[]
+    ) {
+        const categoryCol = row.createDiv({ cls: 'goals-category-column' });
+
+        // Category header with controls
+        const categoryHeader = categoryCol.createDiv({ cls: 'goals-category-header' });
+        categoryHeader.createEl('h3', { text: category.name });
+
+        // Add button (locked to this category)
+        const addBtn = categoryHeader.createEl('button', {
+            cls: 'add-task-btn',
+            text: '+'
+        });
+        addBtn.addEventListener('click', () => {
+            this.openAddGeneralGoalModal(category.id);
+        });
+
+        // Trash button (clear all goals for this category)
+        const trashBtn = categoryHeader.createEl('button', {
+            cls: 'trash-task-btn',
+            text: '🗑️'
+        });
+        trashBtn.addEventListener('click', () => {
+            const confirmed = confirm(`Clear all goals for ${category.name}?`);
+            if (confirmed) {
+                this.plugin.clearCategoryGoals(category.id);
+            }
+        });
+
+        // Category divider (only if there are goals)
+        if (goals.length > 0) {
+            const header = categoryCol.createDiv({ cls: 'monthly-type-header' });
+            header.setText(`──────── ${category.name.toUpperCase()} ────────`);
+        }
+
+        // Render goal cards
+        const goalsList = categoryCol.createDiv({ cls: 'goals-list' });
+        goals.forEach((goal, index) => {
+            this.renderGoalCard(goalsList, goal, index, goals.length);
+        });
+    }
+
+    /**
+     * Render a single goal card with controls
+     */
+    private renderGoalCard(
+        goalsList: HTMLElement,
+        goal: SchedulerItem,
+        index: number,
+        totalCount: number
+    ) {
+        const category = this.itemRenderer.getCategoryById(goal.categoryId);
+        const goalCard = goalsList.createDiv({ cls: 'task-card item-type-goal' });
+
+        // Apply goal styling (gold frame)
+        if (category) {
+            const textColor = this.itemRenderer.applyItemStyling(goalCard, goal, category);
+            if (textColor) {
+                this.itemRenderer.createItemContent(goalCard, goal, textColor);
+            }
+        } else {
+            // Fallback if no category
+            goalCard.createDiv({ cls: 'task-name', text: goal.name });
+            if (goal.description) {
+                goalCard.createDiv({ cls: 'task-description', text: goal.description });
+            }
+        }
+
+        // Button container
+        const btnContainer = goalCard.createDiv({ cls: 'task-buttons' });
+
+        // Reorder buttons (within same category)
+        this.itemRenderer.createReorderButtons(
+            btnContainer,
+            index,
+            totalCount,
+            (direction) => {
+                this.plugin.reorderGeneralGoal(goal.id, direction);
+            }
+        );
+
+        // Edit button
+        this.itemRenderer.createEditButton(btnContainer, () => {
+            this.openEditGeneralGoalModal(goal);
+        });
+
+        // Delete button
+        this.itemRenderer.createDeleteButton(btnContainer, () => {
+            this.plugin.removeItem(goal.id);
+            this.refreshView();
+        });
+    }
+
+    /**
+     * Open modal to add new goal
+     * Locks category and type to 'goal'
+     */
+    private openAddGeneralGoalModal(categoryId?: string) {
+        const categoryName = categoryId
+            ? this.plugin.settings.categories.find((c: CategoryConfig) => c.id === categoryId)?.name
+            : 'General';
+
+        const modal = new AddItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            `New Goal - ${categoryName}`,
+            (item: Omit<SchedulerItem, 'id'>) => {
+                // Ensure it's a goal type
+                const goalItem = {
+                    ...item,
+                    itemType: 'goal' as ItemType,
+                    categoryId: categoryId || item.categoryId
+                };
+                this.plugin.addGeneralGoal(goalItem);
+            },
+            {
+                lockedCategoryId: categoryId,
+                lockedItemType: 'goal'
+            }
+        );
+        modal.open();
+    }
+
+    /**
+     * Open modal to edit existing goal
+     */
+    private openEditGeneralGoalModal(goal: SchedulerItem) {
+        const modal = new EditItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            goal,
+            (updates: Partial<SchedulerItem>) => {
+                this.plugin.updateItem(goal.id, updates);
+            }
+        );
+        modal.open();
+    }
+}
+
+
+## itemRenderer.ts
+
+/**
+ * Shared Item Rendering Utilities
+ * 
+ * RESPONSIBILITY:
+ * Provides common item card rendering logic and color utilities used across
+ * all scheduler sections (weekly, monthly, goals, backlog).
+ * 
+ * USED BY:
+ * - weeklyRenderer.ts (for items in weekly grid cells)
+ * - monthlyRenderer.ts (for items in monthly columns)
+ * - goalsRenderer.ts (for goal cards)
+ * - backlogRenderer.ts (for backlog items)
+ * 
+ * FEATURES:
+ * - Color calculation (contrast, hex to RGB conversion)
+ * - Item type styling (regular, task, goal, deadline)
+ * - Category color application
+ * - Button rendering (edit, delete, checkbox, reorder)
+ */
+import type SchedulerPlugin from '../main';
+import { SchedulerItem, CategoryConfig } from '../types';
+
+export class ItemRenderer {
+    private plugin: SchedulerPlugin;
+
+    constructor(plugin: SchedulerPlugin) {
+        this.plugin = plugin;
+    }
+
+    /**
+     * Calculate contrast color (black or white) for given background color
+     * Uses luminance formula to determine readability
+     */
+    getContrastColor(bgColor: string): string {
+        const hex = bgColor.replace('#', '');
+        const r = parseInt(hex.substr(0, 2), 16);
+        const g = parseInt(hex.substr(2, 2), 16);
+        const b = parseInt(hex.substr(4, 2), 16);
+        const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        return luminance > 0.5 ? '#1a1a1a' : '#ffffff';
+    }
+
+    /**
+     * Convert hex color to RGB object
+     * Used for CSS variable assignment with RGB values
+     */
+    hexToRgb(hex: string): { r: number; g: number; b: number } {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16)
+        } : { r: 0, g: 0, b: 0 };
+    }
+
+    /**
+     * Apply category color and item type styling to card element
+     * Handles different visual styles for: regular, task, goal, deadline
+     */
+    applyItemStyling(
+        itemCard: HTMLElement,
+        item: SchedulerItem,
+        category: CategoryConfig | undefined
+    ) {
+        // Add type-specific class
+        itemCard.addClass(`item-type-${item.itemType || 'regular'}`);
+
+        // Add completed class for tasks
+        if (item.itemType === 'task' && item.completed) {
+            itemCard.addClass('item-completed');
+        }
+
+        if (!category) return;
+
+        const baseColor = category.color;
+        const rgb = this.hexToRgb(baseColor);
+
+        // Set border colors
+        itemCard.style.borderLeftColor = baseColor;
+        itemCard.style.setProperty('--category-color-rgb', `${rgb.r}, ${rgb.g}, ${rgb.b}`);
+
+        // For goal: full border outline
+        if (item.itemType === 'goal') {
+            itemCard.style.borderRightColor = baseColor;
+            itemCard.style.borderTopColor = baseColor;
+            itemCard.style.borderBottomColor = baseColor;
+        }
+
+        // For regular and deadline: solid background
+        if (item.itemType === 'regular' || item.itemType === 'deadline') {
+            itemCard.style.backgroundColor = baseColor;
+        }
+
+        // Calculate text color based on item type
+        let textColor: string;
+        if (item.itemType === 'task' || item.itemType === 'goal') {
+            textColor = '#1a1a1a'; // Dark text on light gradient background
+        } else {
+            textColor = this.getContrastColor(baseColor); // Contrast for solid backgrounds
+        }
+
+        return textColor;
+    }
+
+    /**
+     * Create name and description elements for item card
+     */
+    createItemContent(
+        itemCard: HTMLElement,
+        item: SchedulerItem,
+        textColor: string
+    ) {
+        const nameDiv = itemCard.createDiv({ cls: 'item-name' });
+        nameDiv.setText(item.name);
+        nameDiv.style.color = textColor;
+
+        if (item.description) {
+            const descDiv = itemCard.createDiv({ cls: 'item-description' });
+            descDiv.setText(item.description);
+            descDiv.style.color = textColor;
+            descDiv.style.opacity = '0.75';
+        }
+    }
+
+    /**
+     * Create checkbox button for task items
+     */
+    createCheckboxButton(
+        container: HTMLElement,
+        item: SchedulerItem,
+        onToggle: () => void
+    ): HTMLElement | null {
+        if (item.itemType !== 'task') return null;
+
+        const checkBtn = container.createEl('button', {
+            cls: 'item-check-btn',
+            text: item.completed ? '☑' : '☐'
+        });
+        checkBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onToggle();
+        });
+        return checkBtn;
+    }
+
+    /**
+     * Create edit button (✎)
+     */
+    createEditButton(
+        container: HTMLElement,
+        onEdit: () => void
+    ): HTMLElement {
+        const editBtn = container.createEl('button', {
+            cls: 'item-edit-btn',
+            text: '✎'
+        });
+        editBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onEdit();
+        });
+        return editBtn;
+    }
+
+    /**
+     * Create delete button (×)
+     */
+    createDeleteButton(
+        container: HTMLElement,
+        onDelete: () => void
+    ): HTMLElement {
+        const deleteBtn = container.createEl('button', {
+            cls: 'item-delete-btn',
+            text: '×'
+        });
+        deleteBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onDelete();
+        });
+        return deleteBtn;
+    }
+
+    /**
+     * Create up/down reorder buttons
+     * Only shows buttons if item is not at top/bottom of list
+     */
+    createReorderButtons(
+        container: HTMLElement,
+        index: number,
+        totalCount: number,
+        onMove: (direction: 'up' | 'down') => void
+    ) {
+        // Up button (if not first)
+        if (index > 0) {
+            const upBtn = container.createEl('button', {
+                cls: 'task-reorder-btn task-up-btn',
+                text: '▲'
+            });
+            upBtn.addEventListener('click', () => {
+                onMove('up');
+            });
+        }
+
+        // Down button (if not last)
+        if (index < totalCount - 1) {
+            const downBtn = container.createEl('button', {
+                cls: 'task-reorder-btn task-down-btn',
+                text: '▼'
+            });
+            downBtn.addEventListener('click', () => {
+                onMove('down');
+            });
+        }
+    }
+
+    /**
+     * Get category by ID from plugin settings
+     */
+    getCategoryById(id: string): CategoryConfig | undefined {
+        return this.plugin.settings.categories.find(cat => cat.id === id);
+    }
+}
+
+
+## monthlyRenderer.ts
+
+/**
+ * Monthly Tasks Renderer
+ * 
+ * RESPONSIBILITY:
+ * Renders the monthly schedule section showing tasks organized by month.
+ * Tasks are grouped by type (deadline, goal, task, regular) within each month.
+ * 
+ * USED BY:
+ * - view.ts (main scheduler view calls renderMonthlyTasks())
+ * 
+ * FEATURES:
+ * - 12-month grid layout (3 rows × 4 columns)
+ * - Tasks grouped by type within each month
+ * - Year navigation (prev/next/current year buttons)
+ * - Add task button per month
+ * - Clear month button per month
+ * - Reorder tasks within type group (up/down buttons)
+ * - Edit, delete, and checkbox (for tasks) buttons
+ * 
+ * TASK TYPE ORDERING:
+ * 1. Deadlines (urgent items with specific dates)
+ * 2. Goals (monthly objectives)
+ * 3. Tasks (checkable to-do items)
+ * 4. Regular (other items)
+ */
+import type SchedulerPlugin from '../main';
+import { SchedulerItem } from '../types';
+import { AddItemModal } from '../modals/addItemModal';
+import { EditItemModal } from '../modals/editItemModal';
+import { ItemRenderer } from './itemRenderer';
+
+export class MonthlyRenderer {
+    private plugin: SchedulerPlugin;
+    private itemRenderer: ItemRenderer;
+    private refreshView: () => void;
+
+    constructor(plugin: SchedulerPlugin, refreshView: () => void) {
+        this.plugin = plugin;
+        this.itemRenderer = new ItemRenderer(plugin);
+        this.refreshView = refreshView;
+    }
+
+    /**
+     * Render monthly section header with year navigation
+     */
+    renderMonthlyHeader(container: Element) {
+        const monthlyHeader = container.createDiv({ cls: 'scheduler-section-header' });
+
+        const titleContainer = monthlyHeader.createDiv({ cls: 'header-title-container' });
+        titleContainer.createEl('h2', { text: 'Monthly Schedule' });
+
+        const yearNavContainer = titleContainer.createDiv({ cls: 'year-navigation' });
+
+        // Previous year button
+        const prevYearBtn = yearNavContainer.createEl('button', {
+            cls: 'nav-btn',
+            text: '◀'
+        });
+        prevYearBtn.addEventListener('click', async () => {
+            await this.plugin.changeYear(-1);
+        });
+
+        // Year label
+        const yearLabel = yearNavContainer.createEl('span', {
+            cls: 'year-label',
+            text: this.plugin.currentYear.toString()
+        });
+
+        // Next year button
+        const nextYearBtn = yearNavContainer.createEl('button', {
+            cls: 'nav-btn',
+            text: '▶'
+        });
+        nextYearBtn.addEventListener('click', async () => {
+            await this.plugin.changeYear(1);
+        });
+
+        // Current year button
+        const currentYearBtn = yearNavContainer.createEl('button', {
+            cls: 'today-btn',
+            text: 'Current Year'
+        });
+        currentYearBtn.addEventListener('click', async () => {
+            const currentYear = new Date().getFullYear();
+            if (this.plugin.currentYear !== currentYear) {
+                this.plugin.currentYear = currentYear;
+                await this.plugin.loadYearData(currentYear);
+                this.refreshView();
+            }
+        });
+    }
+
+    /**
+     * Render 12-month grid (3 rows × 4 columns)
+     */
+    renderMonthlyTasks(container: Element) {
+        const monthlyGrid = container.createDiv({ cls: 'monthly-grid' });
+        const months = [
+            'January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December'
+        ];
+
+        // Create 3 rows of 4 months each
+        for (let row = 0; row < 3; row++) {
+            const monthRow = monthlyGrid.createDiv({ cls: 'monthly-row' });
+            for (let col = 0; col < 4; col++) {
+                const monthIndex = row * 4 + col;
+                if (monthIndex < 12) {
+                    this.renderMonthColumn(monthRow, monthIndex, months[monthIndex]);
+                }
+            }
+        }
+    }
+
+    /**
+     * Render a single month column with its tasks
+     */
+    private renderMonthColumn(row: HTMLElement, monthIndex: number, monthName: string) {
+        const monthCol = row.createDiv({ cls: 'month-column' });
+
+        // Month header with controls
+        const monthHeader = monthCol.createDiv({ cls: 'month-header' });
+        monthHeader.createEl('h3', { text: monthName });
+
+        // Add button
+        const addBtn = monthHeader.createEl('button', {
+            cls: 'add-task-btn',
+            text: '+'
+        });
+        addBtn.addEventListener('click', () => {
+            this.openAddMonthlyTaskModal(monthIndex, monthName);
+        });
+
+        // Trash button (clear all tasks for this month)
+        const trashBtn = monthHeader.createEl('button', {
+            cls: 'trash-task-btn',
+            text: '🗑️'
+        });
+        trashBtn.addEventListener('click', () => {
+            const confirmed = confirm(`Clear all tasks for ${monthName}?`);
+            if (confirmed) {
+                this.plugin.clearMonthTasks(monthIndex);
+            }
+        });
+
+        // Tasks list
+        const tasksList = monthCol.createDiv({ cls: 'tasks-list' });
+        const allTasks = this.plugin.getMonthlyTasks(monthIndex);
+
+        // Group tasks by type (deadline, goal, task, regular)
+        const groups: Record<'deadline' | 'goal' | 'task' | 'regular', SchedulerItem[]> = {
+            deadline: [],
+            goal: [],
+            task: [],
+            regular: [],
+        };
+
+        for (const t of allTasks) {
+            switch (t.itemType) {
+                case 'deadline':
+                    groups.deadline.push(t);
+                    break;
+                case 'goal':
+                    groups.goal.push(t);
+                    break;
+                case 'task':
+                    groups.task.push(t);
+                    break;
+                default:
+                    groups.regular.push(t);
+            }
+        }
+
+        // Render each type group in order
+        const order: { key: keyof typeof groups; label: string }[] = [
+            { key: 'deadline', label: 'Deadlines' },
+            { key: 'goal', label: 'Goals' },
+            { key: 'task', label: 'Tasks' },
+            { key: 'regular', label: 'Regular' },
+        ];
+
+        for (const { key, label } of order) {
+            const items = groups[key];
+            if (!items.length) continue;
+
+            // Section header
+            const header = tasksList.createDiv({ cls: 'monthly-type-header' });
+            header.setText(`──────── ${label} ────────`);
+
+            items.forEach((task, index) => {
+                this.renderMonthlyTaskCard(tasksList, task, monthIndex, key, index, items.length);
+            });
+        }
+    }
+
+    /**
+     * Render a single task card within a month
+     * Includes reordering within its type group
+     */
+    private renderMonthlyTaskCard(
+        tasksList: HTMLElement,
+        task: SchedulerItem,
+        monthIndex: number,
+        taskType: string,
+        index: number,
+        totalCount: number
+    ) {
+        const category = this.itemRenderer.getCategoryById(task.categoryId);
+        const taskCard = tasksList.createDiv({ cls: 'task-card' });
+
+        // Apply styling
+        const textColor = this.itemRenderer.applyItemStyling(taskCard, task, category);
+
+        // Create content
+        if (textColor && category) {
+            this.itemRenderer.createItemContent(taskCard, task, textColor);
+        } else {
+            // Fallback if no category
+            taskCard.createDiv({ cls: 'task-name', text: task.name });
+            if (task.description) {
+                taskCard.createDiv({ cls: 'task-description', text: task.description });
+            }
+        }
+
+        // Button container
+        const btnContainer = taskCard.createDiv({ cls: 'task-buttons' });
+
+        // Reorder buttons (within same type group in this month)
+        this.itemRenderer.createReorderButtons(
+            btnContainer,
+            index,
+            totalCount,
+            (direction) => {
+                this.plugin.reorderMonthlyTask(task.id, monthIndex, taskType, direction);
+            }
+        );
+
+        // Checkbox for tasks
+        this.itemRenderer.createCheckboxButton(btnContainer, task, () => {
+            this.plugin.updateItem(task.id, { completed: !task.completed });
+        });
+
+        // Edit button
+        this.itemRenderer.createEditButton(btnContainer, () => {
+            this.openEditMonthlyTaskModal(task);
+        });
+
+        // Delete button
+        this.itemRenderer.createDeleteButton(btnContainer, () => {
+            this.plugin.removeItem(task.id);
+            this.refreshView();
+        });
+    }
+
+    /**
+     * Open modal to add new monthly task
+     * Passes month context for deadline date selection
+     */
+    private openAddMonthlyTaskModal(month: number, monthName: string) {
+        const modal = new AddItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            `Task for ${monthName}`,
+            (item: Omit<SchedulerItem, 'id'>) => {
+                this.plugin.addMonthlyTask(month, item);
+                this.refreshView();
+            },
+            {
+                monthIndex: month,
+                year: this.plugin.currentYear
+            }
+        );
+        modal.open();
+    }
+
+    /**
+     * Open modal to edit existing monthly task
+     */
+    private openEditMonthlyTaskModal(task: SchedulerItem) {
+        const modal = new EditItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            task,
+            (updates: Partial<SchedulerItem>) => {
+                this.plugin.updateItem(task.id, updates);
+            }
+        );
+        modal.open();
+    }
+}
+
+
+## view.ts
+
+/**
+ * Main Scheduler View
+ * 
+ * RESPONSIBILITY:
+ * Orchestrates the entire scheduler interface by coordinating specialized renderers.
+ * Manages view lifecycle (open, close, refresh) and time indicator updates.
+ * 
+ * ARCHITECTURE:
+ * This view acts as a coordinator, delegating rendering responsibilities to:
+ * - WeeklyRenderer: 7-day Ã— hour grid with navigation
+ * - MonthlyRenderer: 12-month grid with tasks grouped by type
+ * - GoalsRenderer: General goals organized by category
+ * - BacklogRenderer: Collapsible to-do sidebar
+ * - ItemRenderer: Shared utilities for item styling and buttons
+ * 
+ * FEATURES:
+ * - Data loading on view open
+ * - Time indicator updates (highlights current hour)
+ * - View refresh coordination
+ * - Interval cleanup on close
+ * 
+ * LAYOUT STRUCTURE:
+ * - Main content area (left): Weekly â†’ Monthly â†’ Goals
+ * - Fixed sidebar (right): Backlog
+ */
+
+import { ItemView, WorkspaceLeaf } from 'obsidian';
+import SchedulerPlugin from '../main';
+import { DateUtils } from '../utils/dateUtils';
+import { WeeklyRenderer } from './weeklyRenderer';
+import { MonthlyRenderer } from './monthlyRenderer';
+import { GoalsRenderer } from './goalsRenderer';
+import { BacklogRenderer } from './backlogRenderer';
+
+export const VIEW_TYPE_SCHEDULER = 'scheduler-view';
+
+export class SchedulerView extends ItemView {
+    plugin: SchedulerPlugin;
+    private timeUpdateInterval: number | null = null;
+
+    // Renderer instances
+    private weeklyRenderer: WeeklyRenderer;
+    private monthlyRenderer: MonthlyRenderer;
+    private goalsRenderer: GoalsRenderer;
+    private backlogRenderer: BacklogRenderer;
+
+    constructor(leaf: WorkspaceLeaf, plugin: SchedulerPlugin) {
+        super(leaf);
+        this.plugin = plugin;
+
+        // Initialize renderers with refresh callback
+        const refreshCallback = () => this.refresh();
+        this.weeklyRenderer = new WeeklyRenderer(plugin, refreshCallback);
+        this.monthlyRenderer = new MonthlyRenderer(plugin, refreshCallback);
+        this.goalsRenderer = new GoalsRenderer(plugin, refreshCallback);
+        this.backlogRenderer = new BacklogRenderer(plugin, refreshCallback);
+    }
+
+    // ==================== View Lifecycle ====================
+
+    getViewType(): string {
+        return VIEW_TYPE_SCHEDULER;
+    }
+
+    getDisplayText(): string {
+        return 'Scheduler';
+    }
+
+    getIcon(): string {
+        return 'calendar';
+    }
+
+    /**
+     * Called when view is opened
+     * Forces data reload and renders all sections
+     */
+    async onOpen() {
+        // Force reload every time view opens
+        this.plugin.dataLoaded = false;
+        await this.plugin.ensureDataLoaded();
+
+        const container = this.containerEl.children[1];
+        container.empty();
+        container.addClass('scheduler-container');
+        this.renderScheduler(container);
+        this.startTimeUpdates();
+    }
+
+    /**
+     * Called when view is closed
+     * Cleans up time update interval
+     */
+    async onClose() {
+        if (this.timeUpdateInterval !== null) {
+            window.clearInterval(this.timeUpdateInterval);
+        }
+    }
+
+    // ==================== Main Rendering ====================
+
+    /**
+     * Render all scheduler sections using specialized renderers
+     */
+    renderScheduler(container: Element) {
+        const mainDiv = container.createDiv({ cls: 'scheduler-main' });
+
+        // Weekly Schedule Section
+        const weeklySection = mainDiv.createDiv({ cls: 'scheduler-weekly-section' });
+        this.weeklyRenderer.renderWeeklyHeader(weeklySection);
+        this.weeklyRenderer.renderWeeklyScheduler(weeklySection);
+
+        // Monthly Tasks Section
+        const monthlySection = mainDiv.createDiv({ cls: 'scheduler-monthly-section' });
+        this.monthlyRenderer.renderMonthlyHeader(monthlySection);
+        this.monthlyRenderer.renderMonthlyTasks(monthlySection);
+
+        // General Goals Section
+        const goalsSection = mainDiv.createDiv({ cls: 'scheduler-goals-section' });
+        this.goalsRenderer.renderGoalsHeader(goalsSection);
+        this.goalsRenderer.renderGeneralGoals(goalsSection);
+
+        // Backlog Section (Fixed sidebar on right)
+        const backlogSection = container.createDiv({ cls: 'scheduler-backlog-section' });
+        this.backlogRenderer.renderBacklog(backlogSection);
+    }
+
+    /**
+     * Refresh the entire view
+     * Called after data changes (add/edit/delete/reorder items)
+     */
+    refresh() {
+        const container = this.containerEl.children[1];
+        container.empty();
+        this.renderScheduler(container);
+        this.updateTimeIndicator();
+    }
+
+    // ==================== Time Indicator System ====================
+
+    /**
+     * Start time indicator updates (every minute)
+     * Highlights current hour in weekly grid
+     */
+    startTimeUpdates() {
+        if (this.timeUpdateInterval !== null) {
+            window.clearInterval(this.timeUpdateInterval);
+        }
+
+        this.updateTimeIndicator();
+
+        this.timeUpdateInterval = window.setInterval(() => {
+            this.updateTimeIndicator();
+        }, 60000); // Update every minute
+
+        this.registerInterval(this.timeUpdateInterval);
+    }
+
+    /**
+     * Update time indicator highlighting
+     * Highlights current hour cell and time label only for current day
+     */
+    updateTimeIndicator() {
+        // Remove old highlights
+        const oldHighlights = this.containerEl.querySelectorAll('.current-hour-cell');
+        oldHighlights.forEach(el => el.classList.remove('current-hour-cell'));
+
+        const oldTimeLabels = this.containerEl.querySelectorAll('.current-hour-label');
+        oldTimeLabels.forEach(el => el.classList.remove('current-hour-label'));
+
+        const now = new Date();
+        const currentHour = now.getHours();
+        const currentDay = (now.getDay() + 6) % 7; // Convert Sunday=0 to Monday=0
+
+        // Check if current hour is within visible range (respects sleep schedule)
+        const startHour = this.plugin.settings.sleepSchedule.enabled
+            ? this.plugin.settings.sleepSchedule.wakeTime
+            : 0;
+        const endHour = this.plugin.settings.sleepSchedule.enabled
+            ? this.plugin.settings.sleepSchedule.sleepTime
+            : 23;
+
+        if (currentHour < startHour || currentHour > endHour) return;
+
+        // Only highlight if viewing current week
+        const { weekNumber, year } = DateUtils.getCurrentWeekInfo();
+        const isCurrentWeek = (
+            this.plugin.currentWeek === weekNumber &&
+            this.plugin.currentYear === year
+        );
+
+        if (!isCurrentWeek) return;
+
+        // Highlight current hour cell for current day only
+        const allCells = this.containerEl.querySelectorAll('.day-cell');
+        allCells.forEach((cell: Element) => {
+            const htmlCell = cell as HTMLElement;
+            const cellHour = parseInt(htmlCell.dataset.hour || '-1');
+            const cellDay = parseInt(htmlCell.dataset.day || '-1');
+
+            // Only highlight if it's the current hour AND current day
+            if (cellHour === currentHour && cellDay === currentDay) {
+                cell.classList.add('current-hour-cell');
+            }
+        });
+
+        // Highlight the time label for current hour
+        const timeCells = this.containerEl.querySelectorAll('.time-cell');
+        const rowIndex = currentHour - startHour;
+        if (rowIndex >= 0 && rowIndex < timeCells.length) {
+            timeCells[rowIndex].classList.add('current-hour-label');
+            timeCells[rowIndex].classList.add('current-hour-cell');
+        }
+    }
+}
+
+
+## weeklyRenderer.ts
+
+/**
+ * Weekly Schedule Renderer
+ * 
+ * RESPONSIBILITY:
+ * Renders the weekly schedule grid with 7 days × hours layout.
+ * Each cell can contain multiple items and is clickable to add new items.
+ * 
+ * USED BY:
+ * - view.ts (main scheduler view calls renderWeeklyScheduler())
+ * 
+ * FEATURES:
+ * - 7-day grid (Monday-Sunday)
+ * - Hourly rows (respects sleep schedule if enabled)
+ * - Current day/hour highlighting
+ * - Week navigation (prev/next/today/jump to date)
+ * - Click cell to add item
+ * - Item cards with edit/delete/checkbox controls
+ * - Standard tasks population
+ * - Clear tasks functionality
+ * 
+ * SLEEP SCHEDULE:
+ * - When enabled: Only shows hours between wake time and sleep time
+ * - When disabled: Shows all 24 hours (00:00-23:00)
+ */
+
+import type SchedulerPlugin from '../main';
+import { SchedulerItem } from '../types';
+import { DateUtils } from '../utils/dateUtils';
+import { AddItemModal } from '../modals/addItemModal';
+import { EditItemModal } from '../modals/editItemModal';
+import { ItemRenderer } from './itemRenderer';
+
+export class WeeklyRenderer {
+    private plugin: SchedulerPlugin;
+    private itemRenderer: ItemRenderer;
+    private refreshView: () => void;
+
+    constructor(plugin: SchedulerPlugin, refreshView: () => void) {
+        this.plugin = plugin;
+        this.itemRenderer = new ItemRenderer(plugin);
+        this.refreshView = refreshView;
+    }
+
+    /**
+     * Render weekly section header with navigation controls
+     */
+    renderWeeklyHeader(container: Element) {
+        const weeklyHeader = container.createDiv({ cls: 'scheduler-section-header' });
+
+        const titleContainer = weeklyHeader.createDiv({ cls: 'header-title-container' });
+        titleContainer.createEl('h2', { text: 'Weekly Schedule' });
+
+        // Get week date range for display
+        const startDate = DateUtils.getDateOfWeek(this.plugin.currentWeek, this.plugin.currentYear);
+        const endDate = DateUtils.getSunday(startDate);
+        const weekRangeString = DateUtils.getWeekRangeString(startDate, endDate);
+
+        const weekNavContainer = titleContainer.createDiv({ cls: 'week-navigation' });
+
+        // Previous week button
+        const prevWeekBtn = weekNavContainer.createEl('button', {
+            cls: 'nav-btn',
+            text: '◀'
+        });
+        prevWeekBtn.addEventListener('click', async () => {
+            await this.plugin.changeWeek(-1);
+        });
+
+        // Week label (shows date range)
+        const weekLabel = weekNavContainer.createEl('span', {
+            cls: 'week-label',
+            text: weekRangeString
+        });
+
+        // Next week button
+        const nextWeekBtn = weekNavContainer.createEl('button', {
+            cls: 'nav-btn',
+            text: '▶'
+        });
+        nextWeekBtn.addEventListener('click', async () => {
+            await this.plugin.changeWeek(1);
+        });
+
+        // Today button (jump to current week)
+        const todayBtn = weekNavContainer.createEl('button', {
+            cls: 'today-btn',
+            text: 'Today'
+        });
+        todayBtn.addEventListener('click', async () => {
+            const { weekNumber, year } = DateUtils.getCurrentWeekInfo();
+            if (this.plugin.currentYear !== year) {
+                await this.plugin.loadYearData(year);
+            }
+            this.plugin.currentWeek = weekNumber;
+            this.plugin.currentYear = year;
+            this.refreshView();
+        });
+
+        // Jump to date functionality
+        const jumpContainer = weekNavContainer.createDiv({ cls: 'week-jump-container' });
+
+        const jumpInput = jumpContainer.createEl('input') as HTMLInputElement;
+        jumpInput.type = 'date';
+        jumpInput.addClass('week-jump-input');
+
+        // Prefill with current Monday
+        const isoMonday = DateUtils.toISODateString(startDate);
+        jumpInput.value = isoMonday;
+
+        const jumpBtn = jumpContainer.createEl('button', {
+            cls: 'nav-btn week-jump-btn',
+            text: 'Go'
+        });
+
+        jumpBtn.addEventListener('click', async () => {
+            if (!jumpInput.value) return;
+
+            const targetDate = new Date(jumpInput.value);
+            if (isNaN(targetDate.getTime())) return;
+
+            const newWeekNumber = DateUtils.getWeekNumber(targetDate);
+            const newYear = DateUtils.getYearForWeek(newWeekNumber, targetDate);
+
+            if (this.plugin.currentYear !== newYear) {
+                await this.plugin.loadYearData(newYear);
+            }
+
+            this.plugin.currentWeek = newWeekNumber;
+            this.plugin.currentYear = newYear;
+            this.refreshView();
+        });
+
+        // Action buttons group
+        const buttonGroup = weeklyHeader.createDiv({ cls: 'header-button-group' });
+
+        // Populate standard tasks button
+        const populateBtn = buttonGroup.createEl('button', {
+            cls: 'populate-btn',
+            text: 'Insert Standard Tasks'
+        });
+        populateBtn.addEventListener('click', () => {
+            this.plugin.populateStandardTasks();
+        });
+
+        // Clear non-standard tasks button
+        const clearNonStandardBtn = buttonGroup.createEl('button', {
+            cls: 'clear-weekly-btn',
+            text: '🗑️ Clear Non-Standard Tasks'
+        });
+        clearNonStandardBtn.addEventListener('click', () => {
+            const confirmed = confirm('Clear all non-standard tasks for current week?');
+            if (confirmed) {
+                this.plugin.clearNonStandardTasks();
+            }
+        });
+
+        // Clear ALL tasks button (destructive)
+        const clearAllBtn = buttonGroup.createEl('button', {
+            cls: 'clear-all-btn',
+            text: '🗑️ Clear All Week Tasks'
+        });
+        clearAllBtn.addEventListener('click', () => {
+            const confirmed = confirm('Clear ALL tasks for current week (including standard/recurring)?');
+            if (confirmed) {
+                this.plugin.clearAllTasks();
+            }
+        });
+    }
+
+    /**
+     * Render weekly schedule grid (7 days × hours)
+     */
+    renderWeeklyScheduler(container: Element) {
+        const weeklyGrid = container.createDiv({ cls: 'weekly-grid' });
+        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+        // Header row with day names
+        const headerRow = weeklyGrid.createDiv({ cls: 'weekly-header-row' });
+        headerRow.createDiv({ cls: 'time-header', text: 'Time' });
+
+        // Detect current day for highlighting
+        const today = new Date();
+        const currentDay = (today.getDay() + 6) % 7; // Convert Sunday=0 to Monday=0
+
+        // Check if viewing current week
+        const { weekNumber, year } = DateUtils.getCurrentWeekInfo();
+        const isCurrentWeek = (this.plugin.currentWeek === weekNumber && this.plugin.currentYear === year);
+
+        days.forEach((day, index) => {
+            const header = headerRow.createDiv({ cls: 'day-header', text: day });
+            // Highlight current day if viewing current week
+            if (index === currentDay && isCurrentWeek) {
+                header.addClass('is-today');
+            }
+        });
+
+        // Get visible hour range (respects sleep schedule)
+        const startHour = this.plugin.settings.sleepSchedule.enabled
+            ? this.plugin.settings.sleepSchedule.wakeTime
+            : 0;
+        const endHour = this.plugin.settings.sleepSchedule.enabled
+            ? this.plugin.settings.sleepSchedule.sleepTime
+            : 23;
+
+        // Create row for each hour
+        for (let hour = startHour; hour <= endHour; hour++) {
+            const hourRow = weeklyGrid.createDiv({ cls: 'weekly-hour-row' });
+
+            // Time label (left column)
+            const hourStr = hour.toString().padStart(2, '0');
+            hourRow.createDiv({
+                cls: 'time-cell',
+                text: `${hourStr}:00`
+            });
+
+            // Create cell for each day
+            days.forEach((_, dayIndex) => {
+                const dayCell = hourRow.createDiv({ cls: 'day-cell' });
+                dayCell.dataset.day = dayIndex.toString();
+                dayCell.dataset.hour = hour.toString();
+
+                // Highlight current day cells
+                if (dayIndex === currentDay && isCurrentWeek) {
+                    dayCell.addClass('is-today');
+                }
+
+                // Render items in this cell
+                const items = this.plugin.getItemsForCell(dayIndex, hour);
+                this.renderCellItems(dayCell, items);
+
+                // Click to add new item
+                dayCell.addEventListener('click', () => {
+                    this.openAddItemModal(dayIndex, hour);
+                });
+            });
+        }
+    }
+
+    /**
+     * Render items within a single cell
+     * Each cell can contain multiple stacked items
+     */
+    private renderCellItems(cell: HTMLElement, items: SchedulerItem[]) {
+        cell.empty();
+
+        items.forEach((item: SchedulerItem) => {
+            const category = this.itemRenderer.getCategoryById(item.categoryId);
+            const itemCard = cell.createDiv({ cls: 'scheduler-item-card' });
+
+            // Apply styling
+            const textColor = this.itemRenderer.applyItemStyling(itemCard, item, category);
+
+            // Create content
+            if (textColor && category) {
+                this.itemRenderer.createItemContent(itemCard, item, textColor);
+            } else {
+                // Fallback if no category
+                itemCard.createDiv({ cls: 'item-name', text: item.name });
+                if (item.description) {
+                    itemCard.createDiv({ cls: 'item-description', text: item.description });
+                }
+            }
+
+            // Button container
+            const btnContainer = itemCard.createDiv({ cls: 'item-buttons' });
+
+            // Checkbox for tasks
+            this.itemRenderer.createCheckboxButton(btnContainer, item, () => {
+                this.plugin.updateItem(item.id, { completed: !item.completed });
+            });
+
+            // Edit button
+            this.itemRenderer.createEditButton(btnContainer, () => {
+                this.openEditItemModal(item);
+            });
+
+            // Delete button
+            this.itemRenderer.createDeleteButton(btnContainer, () => {
+                this.plugin.removeItem(item.id);
+                this.refreshView();
+            });
+        });
+    }
+
+    /**
+     * Open modal to add new item to specific day/hour
+     */
+    private openAddItemModal(day: number, hour: number) {
+        const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+        const title = `${days[day]} at ${hour.toString().padStart(2, '0')}:00`;
+
+        const modal = new AddItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            title,
+            (item: Omit<SchedulerItem, 'id'>) => {
+                this.plugin.addItemToSchedule(day, hour, item);
+                this.refreshView();
+            }
+        );
+        modal.open();
+    }
+
+    /**
+     * Open modal to edit existing item
+     */
+    private openEditItemModal(item: SchedulerItem) {
+        const modal = new EditItemModal(
+            this.plugin.app,
+            this.plugin.settings.categories,
+            item,
+            (updates: Partial<SchedulerItem>) => {
+                this.plugin.updateItem(item.id, updates);
+            }
+        );
+        modal.open();
+    }
+}
+
+

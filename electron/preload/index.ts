@@ -23,6 +23,32 @@ contextBridge.exposeInMainWorld('ipcRenderer', {
   // ...
 })
 
+// ──────────────────────────────────────────────────────────────
+// Filesystem API — safe bridge for the scheduler data layer
+// All paths are relative to the app userData directory.
+// ──────────────────────────────────────────────────────────────
+contextBridge.exposeInMainWorld('api', {
+  /** Read text content of a file (path relative to userData dir) */
+  readFile: (relativePath: string): Promise<string> =>
+    ipcRenderer.invoke('fs:readFile', relativePath),
+
+  /** Write text content to a file (path relative to userData dir) */
+  writeFile: (relativePath: string, content: string): Promise<void> =>
+    ipcRenderer.invoke('fs:writeFile', relativePath, content),
+
+  /** Check whether a file exists */
+  fileExists: (relativePath: string): Promise<boolean> =>
+    ipcRenderer.invoke('fs:fileExists', relativePath),
+
+  /** Ensure a directory exists, creating it recursively if needed */
+  ensureDir: (relativePath: string): Promise<void> =>
+    ipcRenderer.invoke('fs:ensureDir', relativePath),
+
+  /** Return the absolute path to the userData directory */
+  getDataPath: (): Promise<string> =>
+    ipcRenderer.invoke('fs:getDataPath'),
+})
+
 // --------- Preload scripts loading ---------
 function domReady(condition: DocumentReadyState[] = ['complete', 'interactive']) {
   return new Promise((resolve) => {

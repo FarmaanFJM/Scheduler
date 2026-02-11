@@ -93,8 +93,11 @@ const cardStyle = computed(() => {
 
 const textColor = computed(() => {
   const cat = props.category
-  if (!cat) return '#1a1a1a'
-  if (props.item.itemType === 'task' || props.item.itemType === 'goal') return '#1a1a1a'
+  // task/goal: background stays dark (#161b22), always use light text
+  if (!cat) return '#e6edf3'
+  if (props.item.itemType === 'task') return '#e6edf3'
+  if (props.item.itemType === 'goal') return '#e6edf3'
+  // regular/deadline: background IS the category color — compute contrast
   return getContrastColor(cat.color)
 })
 </script>
